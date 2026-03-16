@@ -9,6 +9,7 @@ import scapy.all as sc
 sc.conf.use_pcap = False
 sc.conf.iface = sc.get_working_if()
 
+# global variables to set output and timing
 VERBOSE = False
 PACKET_TIMEOUT = 4
 
@@ -17,7 +18,8 @@ NACK_TYPE = 0
 
 def send_packet(data, host, port):
             
-    #       TODO : v should this [IP part] be replaced by the new header with ACK and SEQ NUM CHECKSUM data
+    # TODO : v replace or wrap new header with ACK and SEQ NUM CHECKSUM data
+    
     packet = sc.IP(dst=host) / sc.UDP(dport=port) / data
             
     answered = sc.sr1(packet, verbose=VERBOSE, timeout=PACKET_TIMEOUT)
@@ -30,21 +32,37 @@ def receive_packet(packet):
     return False
 
 
-def send_ACK(ack_type, seq_num, checksum):
+def send_ACK(packet_to_reply_to: sc.packet.Packet, ack_type, seq_num):
+    
+    if not packet_to_reply_to.haslayer(sc.IP):
+        return None
+    
+    if not packet_to_reply_to.haslayer(sc.UDP):
+        return None
+    
+    dst_address = packet_to_reply_to[sc.IP] # get src address
+    dst_port = packet_to_reply_to[sc.UDP] # get src port number
     
     if ack_type == ACK_TYPE:
         # send ACK with seq num and checksum
         print(f"ACK:\t{seq_num}") # revise
         
+        # build packet+send
+        
     elif ack_type == NACK_TYPE:
         # send NACK with seq num and checksum
         print(f"NACK:\t{seq_num}") # revise
         
+        # build packet+send
 
-def compute_checksum(packet):
-    checksum = decompose(packet) # decompose packet to get checksum
+
+def validate_checksum(packet: sc.packet.Packet):
     
-    if checksum == len(packet): # see if checksum is len of packet
+    packet_checksum = packet.fields["checksum"] # decompose packet to get checksum
+    computed_checksum = sc.checksum(packet) # compute checksum
+    
+    # verify checksum value is equivalent to sum of packets bits 
+    if packet_checksum == computed_checksum: 
         return True
     
     return False
