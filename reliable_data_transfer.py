@@ -12,9 +12,34 @@ sc.conf.iface = sc.get_working_if()
 # global variables to set output and timing
 VERBOSE = False
 PACKET_TIMEOUT = 4
+MAX_PACKETS_IN_FLIGHT = 4
 
-ACK_TYPE = 1
-NACK_TYPE = 0
+ACK_TYPE = 0b1
+NACK_TYPE = 0b0
+
+# RDTP layer which includes required header fields
+class RDTP(sc.Packet):
+    name="Reliable Data Transfer Protocol"
+    fields_desc = [
+        sc.Intfield("seq_num",0x00000000),
+        sc.IntField("ack_num",0x00000000),
+        sc.BitField("syn",0b0),
+        sc.BitField("ack",0b0),
+        sc.BitField("fin",0b0),
+        sc.IntField("checksum",0x00000000)
+    ]
+    
+# sc.IntField("src_port",0x00000000),
+# sc.IntField("dst_port",0x00000000),
+
+dport = ""
+sport = ""
+dst_address = "127.0.0.1"
+
+data = "HELLO"
+
+packet = sc.IP(dst=dst_address) / RDTP(seq_num=-1,) / sc.UDP(dport=dport) / data
+
 
 def send_packet(data, host, port):
             
@@ -25,6 +50,11 @@ def send_packet(data, host, port):
     answered = sc.sr1(packet, verbose=VERBOSE, timeout=PACKET_TIMEOUT)
         
     return answered
+
+
+def build_header(data, host, port, syn=False, ack=False):
+
+    return     
 
 
 def receive_packet(packet):
