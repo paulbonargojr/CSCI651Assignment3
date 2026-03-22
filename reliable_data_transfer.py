@@ -23,6 +23,10 @@ MAX_PACKETS_IN_FLIGHT = 4
 ACK_TYPE = 0b1
 NACK_TYPE = 0b0
 
+SIM_PORT = 12000
+RECEIVER_PORT = 12346
+SENDER_PORT = 12345
+
 # RDTP layer which includes required header fields
 class RDTP(sc.Packet):
     name="Reliable Data Transfer Protocol"
@@ -85,8 +89,7 @@ def build_packet(data, host, port, seq_num, ack_num, syn=False, ack=False, fin=F
 
     header.checksum = checksum_value
     
-    return sc.IP(dst=host) / sc.UDP(sport=12345, dport=int(port)) / header / data
-
+    return sc.IP(dst=host) / sc.UDP(sport=SENDER_PORT, dport=int(port)) / header / data
 
 def send_packet(seq_num, data, host, port):
     
@@ -103,6 +106,14 @@ def send_packet(seq_num, data, host, port):
 
 
 def send_ACK(packet_to_reply_to: sc.packet.Packet, seq_num):
+    dst_address = packet_to_reply_to[sc.IP].src # get src address
+    dst_port = packet_to_reply_to[sc.UDP].sport # get src port number
+    
+    rdtp_header = RDTP(seq_num=0, ack_num=seq_num, ack=1, checksum=0)
+    header_bytes = bytes(rdtp_header)
+    rdtp_header.checksum = compute_checksum(header_bytes)
+    
+    print(f"[ACK SEND] port={SIM_PORT}")
     
     if not packet_to_reply_to.haslayer(sc.IP) or not packet_to_reply_to.haslayer(sc.UDP):
         if VERBOSE:
@@ -110,16 +121,12 @@ def send_ACK(packet_to_reply_to: sc.packet.Packet, seq_num):
         return None
         
     # build packet+send
-    dst_address = packet_to_reply_to[sc.IP].src # get src address
-    dst_port = packet_to_reply_to[sc.UDP].sport # get src port number
     
-    rdtp_header = RDTP(seq_num=0, ack_num=seq_num, ack=1, checksum=0)
     
-    header_bytes = bytes(rdtp_header)
-    rdtp_header.checksum = compute_checksum(header_bytes)
     
     # ack_packet = sc.IP(dst=dst_address) / sc.UDP(sport=int(target_port),dport=12345) / rdtp_header
-    ack_packet = sc.IP(dst=dst_address) / sc.UDP(sport=dst_port,dport=12345) / rdtp_header
+    # ack_packet = sc.IP(dst=dst_address) / sc.UDP(sport=dst_port,dport=12345) / rdtp_header
+    ack_packet = sc.IP(dst=dst_address) / sc.UDP(sport=RECEIVER_PORT, dport=dst_port) / rdtp_header
 
     if VERBOSE:
         print(f"SEND ACK {seq_num}")
@@ -169,14 +176,12 @@ def start_receiver():
     received_data = {}
     
     def receiver(packet):
-        print("p",end=" ") # TODO : REMOVE
         # skip all packets not looking for
         if not packet.haslayer(sc.UDP):
             return
 
         udp = packet[sc.UDP]
-
-        if udp.dport != int(target_port) and udp.sport != 12345:
+        if udp.dport != int(target_port):
             return
 
         if not packet.haslayer(RDTP):
@@ -212,13 +217,16 @@ def test_sender(host, port):
         udp = packet[sc.UDP]
         rdtp = packet[RDTP]
         
-        if udp.dport != 12345:
+        if udp.dport != 12345 and udp.sport != RECEIVER_PORT:
             return
                 
         if rdtp.ack != 1:
             return
 
         seq_num = rdtp.ack_num
+        
+        print(f"[ACK RECV] seq={seq_num}")
+        
         if seq_num in acks_received:
             return
         acks_received.add(seq_num)
@@ -246,7 +254,7 @@ def test_sender(host, port):
             flight_times[seq_num_next] = time.time()
             not_acked_packets[seq_num_next] = packet_sent
             seq_num_next += 1
-        time.sleep(0.1)
+        time.sleep(2)
         
         # wait for all ACKs to be received, go until window start is ACKed
         # while window_start in not_acked_packets:
@@ -309,6 +317,7 @@ if __name__ == "__main__":
     timeout_seconds = args.t
     sender = args.s
     receiver = args.r
+    
     
     sc.bind_layers(sc.UDP, RDTP, dport=int(target_port))
     sc.bind_layers(sc.UDP, RDTP, sport=12345)
