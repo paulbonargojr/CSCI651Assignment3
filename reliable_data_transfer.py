@@ -95,7 +95,9 @@ def send_packet(seq_num, data, host, port):
     if VERBOSE:
         print(f"SEND PACKET {seq_num}")
         
-    sc.send(packet, verbose=False, iface=sc.conf.iface)
+    sc.send(packet, verbose=False)
+    # sc.send(packet, iface=sc.conf.iface, verbose=False)
+    return packet
     # sc.sendp(pkt, verbose=VERBOSE)
     
 
@@ -116,7 +118,8 @@ def send_ACK(packet_to_reply_to: sc.packet.Packet, seq_num):
     header_bytes = bytes(rdtp_header)
     rdtp_header.checksum = compute_checksum(header_bytes)
     
-    ack_packet = sc.IP(dst=dst_address) / sc.UDP(sport=12345,dport=dst_port) / rdtp_header
+    # ack_packet = sc.IP(dst=dst_address) / sc.UDP(sport=int(target_port),dport=12345) / rdtp_header
+    ack_packet = sc.IP(dst=dst_address) / sc.UDP(sport=dst_port,dport=12345) / rdtp_header
 
     if VERBOSE:
         print(f"SEND ACK {seq_num}")
@@ -154,8 +157,8 @@ def receive_packet(packet, expected_seq_num, received_data) -> tuple[int, bin]:
 
     # resend last ACK
     else:
-        print(f"OUT OF ORDER: \n\texpected seq_num = {expected_seq_num}\n\treceived seq_num = {rdtp.seq_num}")
-        send_ACK(packet, expected_seq_num-1)  
+        print(f"OUT OF ORDER:\n\texpected seq_num = {expected_seq_num}\n\treceived seq_num = {rdtp.seq_num}")
+        send_ACK(packet, max(expected_seq_num-1,0))  
     
     return expected_seq_num, 1
 
@@ -166,6 +169,7 @@ def start_receiver():
     received_data = {}
     
     def receiver(packet):
+        print("p",end=" ") # TODO : REMOVE
         # skip all packets not looking for
         if not packet.haslayer(sc.UDP):
             return
@@ -186,19 +190,84 @@ def start_receiver():
 
     print("START RECEIVER")
     
-    sc.sniff(filter=f"udp port {target_port}", prn=receiver, store=0, iface=sc.conf.iface)
+    sc.sniff(prn=receiver, store=0, iface=sc.conf.iface)
+    # sc.sniff(filter=f"udp port {target_port}", prn=receiver, store=0, iface=sc.conf.iface)
     # sc.sniff(prn=receiver, store=0, iface=sc.conf.iface)
 
 def test_sender(host, port):
-    messages = [b"Hello", b"World", b"!!!!!"]
+    messages = [b"Hello", b"World", b"!!!!!", b"THIS IS A TEST", b"I HOPE YOU PASS"]
+    seq_num_next = 0
+    window_start = 0
+    flight_times = {}
+    not_acked_packets = {}
+    acks_received = set()
+    
+    max_length = len(messages)
+    
+    def ack_sniff(packet):
+        # ignore packets without RDTP layer present
+        if not packet.haslayer(RDTP) or not packet.haslayer(sc.UDP):
+            return
 
-    for i, message in enumerate(messages):
-        print(f"SEND\tseq={i}")
-        send_packet(i, message, host, port)
-        time.sleep(1)
+        udp = packet[sc.UDP]
+        rdtp = packet[RDTP]
+        
+        if udp.dport != 12345:
+            return
+                
+        if rdtp.ack != 1:
+            return
 
+        seq_num = rdtp.ack_num
+        if seq_num in acks_received:
+            return
+        acks_received.add(seq_num)
+        
+        if seq_num in not_acked_packets:
+            if VERBOSE:
+                print(f"RECEIVED ACK\tseq_num={seq_num}")
+            del not_acked_packets[seq_num]
+            
+            nonlocal window_start
+            
+            while window_start < max_length and window_start not in not_acked_packets:
+                window_start += 1
+        
+    sniffer = sc.AsyncSniffer(filter=f"udp", prn=ack_sniff, store=False, iface=sc.conf.iface)
+    sniffer.start()
+    
+    while window_start < max_length:
+        
+        # in send window
+        while seq_num_next < window_start + MAX_PACKETS_IN_FLIGHT and seq_num_next < max_length:
+            packet_sent = send_packet(seq_num_next ,messages[seq_num_next], host, port)
+            if VERBOSE:
+                print(f"SEND\tseq_num={seq_num_next}")
+            flight_times[seq_num_next] = time.time()
+            not_acked_packets[seq_num_next] = packet_sent
+            seq_num_next += 1
+        time.sleep(0.1)
+        
+        # wait for all ACKs to be received, go until window start is ACKed
+        # while window_start in not_acked_packets:
+            # sc.sniff(filter=f"udp and port {target_port}", prn=ack_sniff, timeout=0.5, store=0, iface=sc.conf.iface)
+        
+        
+        current = time.time()
+        # retransmit any non-acked packets
+        for a_seq_num, a_packet in list(not_acked_packets.items()):
+            if current - flight_times[a_seq_num] > PACKET_TIMEOUT:
+                sc.send(a_packet, verbose=False)
+                flight_times[a_seq_num] = current
+                if VERBOSE:
+                    print(f"RETRANSMIT PACKET\tseq_num={a_seq_num}")
+    
+    sniffer.stop()
 
 if __name__ == "__main__":
+    # sc.sniff(count=5, prn=lambda p: print(p.summary()), iface=sc.conf.iface)
+    
+    print("\nCONTINUING...\n")
     parser = argparse.ArgumentParser(description="")
 
     # Address (positional argument) : Specify address to send packets to
