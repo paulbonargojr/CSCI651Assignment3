@@ -8,22 +8,15 @@ import scapy.all as sc
 
 # configuring scapy 
 sc.conf.use_pcap = True
-
-# sc.conf.iface = "Npcap Loopback Adapter"
-# sc.conf.iface = sc.get_working_if()
 sc.conf.iface = "\\Device\\NPF_Loopback"
-
 sc.conf.sniff_promisc = False
 
-# global variables to set output and timing
+# global variables to set output and timing and ports
 VERBOSE = True
 PACKET_TIMEOUT = 4
 MAX_PACKETS_IN_FLIGHT = 4
 
-ACK_TYPE = 0b1
-NACK_TYPE = 0b0
-
-SIM_PORT = 12000
+SIMULATOR_PORT = 12000
 RECEIVER_PORT = 12346
 SENDER_PORT = 12345
 
@@ -40,19 +33,6 @@ class RDTP(sc.Packet):
         sc.IntField("checksum",0)
     ]
     
-
-    
-# sc.IntField("src_port",0x00000000),
-# sc.IntField("dst_port",0x00000000),
-
-# sport = ""
-# dport = ""
-# dst_address = "127.0.0.1"
-
-# data = "HELLO"
-
-# packet = sc.IP(dst=dst_address) / RDTP(seq_num=-1,) / sc.UDP(dport=dport) / data
-
 
 def compute_checksum(data: bytes):
     """compute the checksum of data
@@ -84,12 +64,13 @@ def build_packet(data, host, port, seq_num, ack_num, syn=False, ack=False, fin=F
     if isinstance(data, str):
         data = data.encode()
         
-    header = RDTP(seq_num=seq_num, ack_num=ack_num, syn=syn, ack=ack, fin=fin, checksum=0)
+    header = RDTP(seq_num=seq_num, ack_num=ack_num, syn=int(syn), ack=int(ack), fin=int(fin), checksum=0)
     checksum_value = compute_checksum(bytes(header) + data)
 
     header.checksum = checksum_value
     
     return sc.IP(dst=host) / sc.UDP(sport=SENDER_PORT, dport=int(port)) / header / data
+
 
 def send_packet(seq_num, data, host, port):
     
@@ -99,13 +80,18 @@ def send_packet(seq_num, data, host, port):
         print(f"SEND PACKET {seq_num}")
         
     sc.send(packet, verbose=False)
-    # sc.send(packet, iface=sc.conf.iface, verbose=False)
     return packet
-    # sc.sendp(pkt, verbose=VERBOSE)
     
 
 
-def send_ACK(packet_to_reply_to: sc.packet.Packet, seq_num):
+def send_ack(packet_to_reply_to: sc.packet.Packet, seq_num):
+    
+    if not packet_to_reply_to.haslayer(sc.IP) or not packet_to_reply_to.haslayer(sc.UDP):
+        if VERBOSE:
+            print(f"ERROR: MISSING LAYERS {seq_num}")
+        return 
+        
+    # build packet+send
     dst_address = packet_to_reply_to[sc.IP].src # get src address
     dst_port = packet_to_reply_to[sc.UDP].sport # get src port number
     
@@ -113,26 +99,13 @@ def send_ACK(packet_to_reply_to: sc.packet.Packet, seq_num):
     header_bytes = bytes(rdtp_header)
     rdtp_header.checksum = compute_checksum(header_bytes)
     
-    print(f"[ACK SEND] port={SIM_PORT}")
-    
-    if not packet_to_reply_to.haslayer(sc.IP) or not packet_to_reply_to.haslayer(sc.UDP):
-        if VERBOSE:
-            print(f"ERROR: MISSING LAYERS {seq_num}")
-        return None
-        
-    # build packet+send
-    
-    
-    
-    # ack_packet = sc.IP(dst=dst_address) / sc.UDP(sport=int(target_port),dport=12345) / rdtp_header
-    # ack_packet = sc.IP(dst=dst_address) / sc.UDP(sport=dst_port,dport=12345) / rdtp_header
+    print(f"[ACK SEND] port={SIMULATOR_PORT}")    
     ack_packet = sc.IP(dst=dst_address) / sc.UDP(sport=RECEIVER_PORT, dport=dst_port) / rdtp_header
 
     if VERBOSE:
         print(f"SEND ACK {seq_num}")
     
     sc.send(ack_packet, verbose=False)
-
 
 
 def receive_packet(packet, expected_seq_num, received_data) -> tuple[int, bin]:
@@ -159,21 +132,26 @@ def receive_packet(packet, expected_seq_num, received_data) -> tuple[int, bin]:
         
         received_data[rdtp.seq_num] = bytes(rdtp.payload)
         
-        send_ACK(packet, rdtp.seq_num)
-        expected_seq_num += 1
+        send_ack(packet, rdtp.seq_num)
+        return expected_seq_num + 1, 1
 
     # resend last ACK
-    else:
-        print(f"OUT OF ORDER:\n\texpected seq_num = {expected_seq_num}\n\treceived seq_num = {rdtp.seq_num}")
-        send_ACK(packet, max(expected_seq_num-1,0))  
+    print(f"OUT OF ORDER:\n\texpected seq_num = {expected_seq_num}\n\treceived seq_num = {rdtp.seq_num}")
+    send_ack(packet, max(expected_seq_num-1,0))  
     
-    return expected_seq_num, 1
+    return expected_seq_num, 0
 
 
-def start_receiver():
+def start_receiver(target_port):
     
     expected_seq_num = 0
     received_data = {}
+    stop_sniff = [False]
+    
+    target_port = int(target_port)
+    
+    sc.bind_layers(sc.UDP, RDTP, dport=target_port)
+    sc.bind_layers(sc.UDP, RDTP, sport=SIMULATOR_PORT)
     
     def receiver(packet):
         # skip all packets not looking for
@@ -181,7 +159,7 @@ def start_receiver():
             return
 
         udp = packet[sc.UDP]
-        if udp.dport != int(target_port):
+        if udp.dport != target_port:
             return
 
         if not packet.haslayer(RDTP):
@@ -189,18 +167,30 @@ def start_receiver():
         
         if VERBOSE:
             print("RECEIVED PACKET:", packet.summary())
+            
+        rdtp = packet[RDTP]
+        
+        # handling diconnection, fin bit
+        if rdtp.fin == 1:
+            print("RECEIVED FIN: closing receiver")
+            send_ack(packet, rdtp.seq_num)
+            stop_sniff[0] = True
+            return
         
         nonlocal expected_seq_num
-        expected_seq_num, result = receive_packet(packet,expected_seq_num, received_data)
-
-    print("START RECEIVER")
+        expected_seq_num, result = receive_packet(packet, expected_seq_num, received_data)
     
-    sc.sniff(prn=receiver, store=0, iface=sc.conf.iface)
-    # sc.sniff(filter=f"udp port {target_port}", prn=receiver, store=0, iface=sc.conf.iface)
-    # sc.sniff(prn=receiver, store=0, iface=sc.conf.iface)
+    def stop_filter(b_packet):
+        return stop_sniff[0]
+    
+    print(f"START RECEIVER\nPORT: {target_port}\n")
+    
+    sc.sniff(prn=receiver, stop_filter=stop_filter, store=0, iface=sc.conf.iface)
 
-def test_sender(host, port):
-    messages = [b"Hello", b"World", b"!!!!!", b"THIS IS A TEST", b"I HOPE YOU PASS"]
+    return received_data
+
+
+def run_sender(messages, host, port):
     seq_num_next = 0
     window_start = 0
     flight_times = {}
@@ -208,7 +198,10 @@ def test_sender(host, port):
     acks_received = set()
     
     max_length = len(messages)
-    
+
+    sc.bind_layers(sc.UDP, RDTP, sport=SIMULATOR_PORT)
+    sc.bind_layers(sc.UDP, RDTP, dport=SENDER_PORT)
+
     def ack_sniff(packet):
         # ignore packets without RDTP layer present
         if not packet.haslayer(RDTP) or not packet.haslayer(sc.UDP):
@@ -217,7 +210,7 @@ def test_sender(host, port):
         udp = packet[sc.UDP]
         rdtp = packet[RDTP]
         
-        if udp.dport != 12345 and udp.sport != RECEIVER_PORT:
+        if udp.dport != SENDER_PORT:
             return
                 
         if rdtp.ack != 1:
@@ -225,7 +218,7 @@ def test_sender(host, port):
 
         seq_num = rdtp.ack_num
         
-        print(f"[ACK RECV] seq={seq_num}")
+        print(f"[ACK RECV] seq_num={seq_num}")
         
         if seq_num in acks_received:
             return
@@ -238,45 +231,55 @@ def test_sender(host, port):
             
             nonlocal window_start
             
-            while window_start < max_length and window_start not in not_acked_packets:
+            while window_start < max_length and window_start not in not_acked_packets and window_start in acks_received:
                 window_start += 1
         
-    sniffer = sc.AsyncSniffer(filter=f"udp", prn=ack_sniff, store=False, iface=sc.conf.iface)
+    sniffer = sc.AsyncSniffer(filter="udp", prn=ack_sniff, store=False, iface=sc.conf.iface)
     sniffer.start()
     
-    while window_start < max_length:
+    try:
         
-        # in send window
-        while seq_num_next < window_start + MAX_PACKETS_IN_FLIGHT and seq_num_next < max_length:
-            packet_sent = send_packet(seq_num_next ,messages[seq_num_next], host, port)
-            if VERBOSE:
-                print(f"SEND\tseq_num={seq_num_next}")
-            flight_times[seq_num_next] = time.time()
-            not_acked_packets[seq_num_next] = packet_sent
-            seq_num_next += 1
-        time.sleep(2)
+        while window_start < max_length:
+            
+            # in send window
+            while seq_num_next < window_start + MAX_PACKETS_IN_FLIGHT and seq_num_next < max_length:
+                packet_sent = send_packet(seq_num_next, messages[seq_num_next], host, port)
+                # if VERBOSE:
+                #     print(f"SEND\tseq_num={seq_num_next}")
+                flight_times[seq_num_next] = time.time()
+                not_acked_packets[seq_num_next] = packet_sent
+                seq_num_next += 1
+                
+            time.sleep(0.2)
+            
+            
+            current = time.time()
+            # retransmit any non-acked packets
+            for a_seq_num, a_packet in list(not_acked_packets.items()):
+                if current - flight_times[a_seq_num] > PACKET_TIMEOUT:
+                    sc.send(a_packet, verbose=False)
+                    flight_times[a_seq_num] = current
+                    if VERBOSE:
+                        print(f"RETRANSMIT PACKET\tseq_num={a_seq_num}")
+    finally:
+        sniffer.stop()
         
-        # wait for all ACKs to be received, go until window start is ACKed
-        # while window_start in not_acked_packets:
-            # sc.sniff(filter=f"udp and port {target_port}", prn=ack_sniff, timeout=0.5, store=0, iface=sc.conf.iface)
-        
-        
-        current = time.time()
-        # retransmit any non-acked packets
-        for a_seq_num, a_packet in list(not_acked_packets.items()):
-            if current - flight_times[a_seq_num] > PACKET_TIMEOUT:
-                sc.send(a_packet, verbose=False)
-                flight_times[a_seq_num] = current
-                if VERBOSE:
-                    print(f"RETRANSMIT PACKET\tseq_num={a_seq_num}")
-    
-    sniffer.stop()
+    # send fin packet to end transfer
+    fin_packet = build_packet(b"", host, port, seq_num_next, 0, fin=True)
+    sc.send(fin_packet, verbose=False)
+    print("FIN SENT: complete")
+
+def test_sender(host, port):
+    messages = [b"Hello", b"World", b"!!!!!", b"THIS IS A TEST", b"I HOPE YOU PASS"]
+    run_sender(messages, host, int(port))
+
 
 if __name__ == "__main__":
+    # testing here
     # sc.sniff(count=5, prn=lambda p: print(p.summary()), iface=sc.conf.iface)
     
-    print("\nCONTINUING...\n")
-    parser = argparse.ArgumentParser(description="")
+    print("\nReliable Data Transfer Protocol (RDTP)\n")
+    parser = argparse.ArgumentParser(description="RDTP sender and receiver")
 
     # Address (positional argument) : Specify address to send packets to
     parser.add_argument("address", 
@@ -314,15 +317,20 @@ if __name__ == "__main__":
 
     target_ip = args.address
     target_port = args.port
+    
     timeout_seconds = args.t
+    
     sender = args.s
     receiver = args.r
     
-    
     sc.bind_layers(sc.UDP, RDTP, dport=int(target_port))
-    sc.bind_layers(sc.UDP, RDTP, sport=12345)
+    sc.bind_layers(sc.UDP, RDTP, dport=RECEIVER_PORT)
+    
+    sc.bind_layers(sc.UDP, RDTP, sport=SENDER_PORT)
+    sc.bind_layers(sc.UDP, RDTP, sport=RECEIVER_PORT)
+    sc.bind_layers(sc.UDP, RDTP, sport=SIMULATOR_PORT)
     
     if receiver:
-        start_receiver()
+        start_receiver(target_port)
     elif sender:
         test_sender(target_ip, target_port)
