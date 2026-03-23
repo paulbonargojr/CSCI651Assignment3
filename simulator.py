@@ -1,6 +1,8 @@
 import random
 import scapy.all as sc
 from reliable_data_transfer import RDTP
+import socket
+import traceback
 
 LOSS_PROBABILITY = 0.2
 CORRUPTION_PROBABILITY = 0.1
@@ -14,6 +16,14 @@ buffer = []
 
     
 def corrupt_packet_chance(packet):
+    """random chance to corrupt a packet
+
+    Args:
+        packet (scapy.packet.Packet): packet to possibly corrupt
+
+    Returns:
+        scapy.packet.Packet: normal or corrupted packet
+    """
     if random.random() < CORRUPTION_PROBABILITY:
 
         raw = bytearray(bytes(packet))
@@ -34,6 +44,14 @@ def corrupt_packet_chance(packet):
 
 
 def rewrite_ports(packet):
+    """changes ports of a copy of a passed packet to simulate a network
+
+    Args:
+        packet (scpy.packet.Packets): packet to forward
+
+    Returns:
+        scapy.packet.Packet: packet with ports switched
+    """
     a_packet = packet.copy()
     sport = a_packet[sc.UDP].sport
     dport = a_packet[sc.UDP].dport
@@ -57,60 +75,92 @@ def rewrite_ports(packet):
     return a_packet
 
 
+def forward(packet):
+    """forward packet using sockets 
+
+    Args:
+        packet (scapy.packet.Packet): packet to send
+    """
+    payload = bytes(packet[sc.UDP].payload)
+    
+    a_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)    
+    a_socket.sendto(payload, (packet[sc.IP].dst, packet[sc.UDP].dport))
+
+    a_socket.close()
+
+
 def network_forwarding(packet):
+    """sends packets from sender to receiver, taking into account
+    any loss, reordering, or corruption
+
+    Args:
+        packet (scapy.packet.Packet): packet to send
+    """
     print(packet.summary())
     
-    global buffer
-    
-    if not packet.haslayer(RDTP) or not packet.haslayer(sc.UDP):
-        return
-    
-    udp = packet[sc.UDP]
-    if udp.sport == SIMULATOR_PORT:
-        return 
-    
-    rdtp = packet[RDTP]
-    print(f"SIMULATION: seq={rdtp.seq_num} ack={rdtp.ack}")
+    try:
+        global buffer
+        
+        if not packet.haslayer(RDTP) or not packet.haslayer(sc.UDP):
+            return
+        
+        udp = packet[sc.UDP]
+        if udp.sport == SIMULATOR_PORT:
+            return 
+        
+        rdtp = packet[RDTP]
+        print(f"SIMULATION: seq={rdtp.seq_num} ack={rdtp.ack}")
+        
+        # always forward FIN so receiver exits
+        if rdtp.fin == 1:
+            forward_packet = rewrite_ports(packet)
+            if forward_packet is not None:
+                forward(forward_packet)
+            return
 
-    # loss phase
-    if random.random() < LOSS_PROBABILITY:
-        print(f"SIMULATION: DROP seq={rdtp.seq_num}")
-        return
+        # loss phase
+        if random.random() < LOSS_PROBABILITY:
+            print(f"SIMULATION: DROP seq={rdtp.seq_num}")
+            return
 
+        # reordering phase
+        if random.random() < REORDERING_PROBABILITY:
+            print(f"SIMULATION: BUFFER seq={rdtp.seq_num}")
+            buffer.append(packet)
+            return
 
-    # reordering phase
-    if random.random() < REORDERING_PROBABILITY:
-        print(f"SIMULATION: BUFFER seq={rdtp.seq_num}")
-        buffer.append(packet)
-        return
+        # buffer packets sending  
+        while buffer:
+            a_packet = buffer.pop(0)
+            forwarding_packet = rewrite_ports(a_packet)
+            if forwarding_packet is not None:
+                # corruption phase
+                forwarding_packet = corrupt_packet_chance(forwarding_packet)
+                
+                print(f"SIMULATION: BUFFERED seq_num={a_packet[RDTP].seq_num}")
+                forward(forwarding_packet)
+                # sc.send(forwarding_packet, verbose=False)
+                # sc.sendp(sc.Ether()/forwarding_packet, verbose=False)
 
-    # buffer packets sending  
-    while buffer:
-        a_packet = buffer.pop(0)
-        forwarding_packet = rewrite_ports(a_packet)
-        if forwarding_packet is not None:
-            # corruption phase
-            forwarding_packet = corrupt_packet_chance(forwarding_packet)
-            
-            print(f"SIMULATION: BUFFERED seq_num={a_packet[RDTP].seq_num}")
-            sc.send(forwarding_packet, verbose=False)
-            # sc.sendp(sc.Ether()/forwarding_packet, verbose=False)
-
-    # normal sending
-    forward_packet = rewrite_ports(packet)
-    if forward_packet is None:
-        print("SIMULATION: DROP")
-        return 
-    
-    forward_packet = corrupt_packet_chance(forward_packet)
-    
-    if forward_packet is None:
-        print(f"SIMULATION: DROP")
-        return
-    
-    print(f"SIMULATION: FORWARD seq_num={rdtp.seq_num} dport={forward_packet[sc.UDP].dport}")
-    sc.send(forward_packet, verbose=False)
-    # sc.sendp(sc.Ether()/forward_packet, verbose=False)
+        # normal sending
+        forward_packet = rewrite_ports(packet)
+        if forward_packet is None:
+            print("SIMULATION: DROP")
+            return 
+        
+        forward_packet = corrupt_packet_chance(forward_packet)
+        
+        if forward_packet is None:
+            print(f"SIMULATION: DROP")
+            return
+        
+        print(f"SIMULATION: FORWARD seq_num={rdtp.seq_num} dport={forward_packet[sc.UDP].dport}")
+        forward(forward_packet)
+        # sc.send(forward_packet, verbose=False)
+        # sc.sendp(sc.Ether()/forward_packet, verbose=False)
+    except Exception as e:
+        print(f"SIMULATION: ERROR - {e}")
+        traceback.print_exc()
 
 def main():
     

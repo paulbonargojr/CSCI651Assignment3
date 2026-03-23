@@ -47,6 +47,15 @@ def compute_checksum(data: bytes):
 
 
 def validate_checksum(packet: sc.packet.Packet):
+    """verify rdtp checksum is correct from comparing the field
+    versus the computed checksum
+
+    Args:
+        packet (sc.packet.Packet): packet with an rdtp layer
+
+    Returns:
+        bool: if computed checksum matches checksum field
+    """
     rdtp = packet[RDTP]
     packet_checksum = rdtp.checksum # decompose packet to get checksum field
     
@@ -59,7 +68,21 @@ def validate_checksum(packet: sc.packet.Packet):
 
 
 def build_packet(data, host, port, seq_num, ack_num, syn=False, ack=False, fin=False):
-    
+    """construct a complete IP / UDP / RDTP packet
+
+    Args:
+        data (str or bytes): payload of packet to send
+        host (str): destination ip address
+        port (int or str): destination port number
+        seq_num (int): sequence number 
+        ack_num (int): acknowledgement number
+        syn (bool, optional): flags SYN. Defaults to False.
+        ack (bool, optional): flags ACK. Defaults to False.
+        fin (bool, optional): flags FIN. Defaults to False.
+
+    Returns:
+        scapy.packet.Packet: fully assembled packet to be sent
+    """
     # convert data to bytes
     if isinstance(data, str):
         data = data.encode()
@@ -73,6 +96,17 @@ def build_packet(data, host, port, seq_num, ack_num, syn=False, ack=False, fin=F
 
 
 def send_packet(seq_num, data, host, port):
+    """build and transmit a single RDTP packet
+
+    Args:
+        seq_num (int): sequence number for this packet
+        data (str or bytes): payload
+        host (str): destination IP address
+        port (int or str): destination UDP port
+
+    Returns:
+        scapy.packet.Packet: packet that was sent
+    """
     
     packet = build_packet(data, host, port, seq_num, 0)
     
@@ -81,10 +115,16 @@ def send_packet(seq_num, data, host, port):
         
     sc.send(packet, verbose=False)
     return packet
-    
+
 
 
 def send_ack(packet_to_reply_to: sc.packet.Packet, seq_num):
+    """send an ACK packet to sender in response to data packet
+
+    Args:
+        packet_to_reply_to (sc.packet.Packet): packet being ACKed
+        seq_num (int): sequence number being ACKed
+    """
     
     if not packet_to_reply_to.haslayer(sc.IP) or not packet_to_reply_to.haslayer(sc.UDP):
         if VERBOSE:
@@ -93,7 +133,8 @@ def send_ack(packet_to_reply_to: sc.packet.Packet, seq_num):
         
     # build packet+send
     dst_address = packet_to_reply_to[sc.IP].src # get src address
-    dst_port = packet_to_reply_to[sc.UDP].sport # get src port number
+    dst_port = SENDER_PORT
+    # dst_port = packet_to_reply_to[sc.UDP].sport # get src port number
     
     rdtp_header = RDTP(seq_num=0, ack_num=seq_num, ack=1, checksum=0)
     header_bytes = bytes(rdtp_header)
@@ -109,7 +150,16 @@ def send_ack(packet_to_reply_to: sc.packet.Packet, seq_num):
 
 
 def receive_packet(packet, expected_seq_num, received_data) -> tuple[int, bin]:
-    # decompose packet to see if it is data or ACK, get seq num, get checksum and compute 
+    """decompose packet to see if it is data or ACK, get seq num, get checksum and compute 
+
+    Args:
+        packet (scapy.packet.Packet): scapy packet captured by sniffer
+        expected_seq_num (int): next sequence number
+        received_data (dict): sequence number : payload bytes
+
+    Returns:
+        tuple[int, bin]: new expected sequence number , [1 on successful, 0 on fail]
+    """
 
     if not packet.haslayer(RDTP):
         return expected_seq_num, 0
@@ -143,6 +193,14 @@ def receive_packet(packet, expected_seq_num, received_data) -> tuple[int, bin]:
 
 
 def start_receiver(target_port):
+    """start RDTP receiver and sniff until a FIN packet is received
+
+    Args:
+        target_port (int or str): UDP port to listen on
+
+    Returns:
+        dict: sequence number : payload bytes
+    """
     
     expected_seq_num = 0
     received_data = {}
@@ -151,7 +209,6 @@ def start_receiver(target_port):
     target_port = int(target_port)
     
     sc.bind_layers(sc.UDP, RDTP, dport=target_port)
-    sc.bind_layers(sc.UDP, RDTP, sport=SIMULATOR_PORT)
     
     def receiver(packet):
         # skip all packets not looking for
@@ -191,6 +248,13 @@ def start_receiver(target_port):
 
 
 def run_sender(messages, host, port):
+    """send list of byte payloads using sliding window
+
+    Args:
+        messages (list): ordered list of bytes payloads
+        host (str): destination ip address
+        port (int or str): destination udp port
+    """
     seq_num_next = 0
     window_start = 0
     flight_times = {}
@@ -203,6 +267,11 @@ def run_sender(messages, host, port):
     sc.bind_layers(sc.UDP, RDTP, dport=SENDER_PORT)
 
     def ack_sniff(packet):
+        """asyncronous sniffer callback that processes incoming ACKs
+
+        Args:
+            packet (scapy.packet.Packet): packet captured by sniffer
+        """
         # ignore packets without RDTP layer present
         if not packet.haslayer(RDTP) or not packet.haslayer(sc.UDP):
             return
@@ -270,6 +339,12 @@ def run_sender(messages, host, port):
     print("FIN SENT: complete")
 
 def test_sender(host, port):
+    """send a set of test strings to verify end-to-end functionality
+
+    Args:
+        host (str): destination IP address
+        port (int or str): destination UDP port
+    """
     messages = [b"Hello", b"World", b"!!!!!", b"THIS IS A TEST", b"I HOPE YOU PASS"]
     run_sender(messages, host, int(port))
 
